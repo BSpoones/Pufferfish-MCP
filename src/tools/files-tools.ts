@@ -2,6 +2,12 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { resolveServer } from "../resolve.js";
 import { jsonBlock, ok, requireConfirm, wrap } from "../toolwrap.js";
+import { compactStackTraces } from "../stacktrace.js";
+
+/** A config, jar listing, or source file could coincidentally contain a line matching a frame pattern, so compaction stays scoped to files that are actually logs rather than running over every read. */
+function looksLikeLogFile(filePath: string): boolean {
+  return /\.log(\.\d+)?(\.gz)?$/i.test(filePath) || /\/(logs|crash-reports)\//i.test(filePath);
+}
 
 const panelArg = z
   .string()
@@ -83,22 +89,26 @@ export function registerFilesTools(server: McpServer): void {
   server.registerTool(
     "read_file",
     {
-      description: "Read a file's contents from a server. Large files are truncated.",
+      description:
+        "Read a file's contents from a server. Large files are truncated. " +
+        "Java stack traces in a .log file (or under logs/crash-reports) are compacted by default - pass full: true for untouched output.",
       inputSchema: {
         server: serverArg,
         file: z.string().describe("File path to read."),
+        full: z.boolean().optional().describe("Skip stack-trace compaction on a log file and return it untouched. Default false."),
         panel: panelArg,
       },
     },
-    wrap(async (args: { server: string; file: string; panel?: string }) => {
+    wrap(async (args: { server: string; file: string; full?: boolean; panel?: string }) => {
       const MAX_READ_LENGTH = 50000;
       const ref = await resolveServer(args.server, args.panel);
-      const contents = await ref.panel.api<string>(
+      const raw = await ref.panel.api<string>(
         "GET",
         `/server/${ref.identifier}/files/contents`,
         undefined,
         { query: { file: args.file }, raw: true }
       );
+      const contents = !args.full && looksLikeLogFile(args.file) ? compactStackTraces(raw) : raw;
       if (contents.length > MAX_READ_LENGTH) {
         return ok(`${contents.slice(0, MAX_READ_LENGTH)}\n\n[truncated — file is ${contents.length} chars, showing first ${MAX_READ_LENGTH}]`);
       }
