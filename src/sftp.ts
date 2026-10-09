@@ -444,14 +444,32 @@ async function setupKey(alias: string): Promise<string> {
   const keyPath = path.join(keyDir, `id_ed25519_${aliasResult.alias}`);
   await fsMkdir(keyDir, { recursive: true });
 
-  const { private: privateKey, public: publicKeyRaw } = ssh2Utils.generateKeyPairSync("ed25519", {
-    comment: "claude-mcp",
-  });
-  await writeFile(keyPath, privateKey, { mode: 0o600 });
-  await restrictKeyFilePermissions(keyPath, lines);
-  lines.push(`Generated an ed25519 keypair; private key saved to ${keyPath}.`);
+  let publicKey: string;
+  if (existsSync(keyPath)) {
+    const parsed = ssh2Utils.parseKey(await readFile(keyPath));
+    if (parsed instanceof Error) {
+      throw new PanelError(`Existing key at ${keyPath} could not be parsed (${parsed.message}). Delete it to generate a new one.`);
+    }
+    publicKey = `${parsed.type} ${parsed.getPublicSSH().toString("base64")} claude-mcp`;
+    lines.push(`Reusing the existing private key at ${keyPath}.`);
 
-  const publicKey = publicKeyRaw.trim();
+    if (panel.cfg.ssh_key && path.resolve(expandHome(panel.cfg.ssh_key)) === path.resolve(keyPath)) {
+      const before = lines.length;
+      await testConnect(alias, lines, "the existing key");
+      if (lines[before]?.startsWith("Verified")) {
+        lines.push("Key is already registered and working — nothing registered with the panel.");
+        return lines.join("\n");
+      }
+    }
+  } else {
+    const { private: privateKey, public: publicKeyRaw } = ssh2Utils.generateKeyPairSync("ed25519", {
+      comment: "claude-mcp",
+    });
+    await writeFile(keyPath, privateKey, { mode: 0o600 });
+    await restrictKeyFilePermissions(keyPath, lines);
+    lines.push(`Generated an ed25519 keypair; private key saved to ${keyPath}.`);
+    publicKey = publicKeyRaw.trim();
+  }
 
   let registered = false;
   try {
